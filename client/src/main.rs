@@ -40,7 +40,7 @@ async fn main_inner() -> Result<(), Error> {
     // Initialize panic hook.
     initialize_panic_reporting();
 
-    // Initialize signal handler
+    // Initialize signal handler.
     initialize_signal_handler();
 
     // Early return in case of a proving process.
@@ -50,7 +50,6 @@ async fn main_inner() -> Result<(), Error> {
     }
 
     // Create config builder and apply command line and config file.
-    // You usually want the command line to override config settings, so the order is important.
     let mut builder = ClientConfig::builder();
     builder.config_file(&config_file)?;
     builder.command_line(&command_line)?;
@@ -71,15 +70,22 @@ async fn main_inner() -> Result<(), Error> {
     if let Some(rpc_config) = rpc_config {
         use nimiq::extras::rpc_server::initialize_rpc_server;
         let rpc_server = initialize_rpc_server(&client, rpc_config, client.wallet_store())
-            .expect("Failed to initialize RPC server");
-        spawn(async move { rpc_server.run().await });
+            .map_err(|e| {
+                log::error!("Failed to initialize RPC server: {:?}", e);
+                e
+            })?;
+        spawn(async move {
+            if let Err(e) = rpc_server.run().await {
+                log::error!("RPC server encountered an error: {:?}", e);
+            }
+        });
     }
 
     // Vector for task monitors (Tokio task metrics)
     let mut nimiq_task_metric = vec![];
 
     // Start consensus.
-    let consensus = client.take_consensus().unwrap();
+    let consensus = client.take_consensus().ok_or_else(|| Error::Custom("Consensus not found"))?;
 
     if metrics_enabled {
         let con_metrics_monitor = tokio_metrics::TaskMonitor::new();
@@ -95,7 +101,9 @@ async fn main_inner() -> Result<(), Error> {
     let consensus = client.consensus_proxy();
     let mempool = client.mempool();
 
-    let zkp_component = client.take_zkp_component().unwrap();
+    let zkp_component = client
+        .take_zkp_component()
+        .ok_or_else(|| Error::Custom("ZKP Component not found"))?;
     spawn(zkp_component); //ITODO get metrics on this? ask JD
 
     // Start validator
@@ -151,8 +159,6 @@ async fn main_inner() -> Result<(), Error> {
     }
 
     // Create the "monitor" future which never completes to keep the client alive.
-    // This closure is executed after the client has been initialized.
-    // TODO Get rid of this. Make the Client a future/stream instead.
     let mut statistics_interval = config_file.log.statistics;
     let mut show_statistics = true;
     if statistics_interval == 0 {
@@ -193,7 +199,7 @@ async fn main_inner() -> Result<(), Error> {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), Error> {
     if let Err(e) = main_inner().await {
         log_error_cause_chain(&e);
         std::process::exit(1);
